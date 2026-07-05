@@ -1,0 +1,78 @@
+name: Road Test Scanner (bootstrap)
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs: {}
+
+concurrency:
+  group: rt-scanner
+  cancel-in-progress: false
+
+jobs:
+  rt-scan:
+    runs-on: ubuntu-latest
+    # Long-running loop job: each scan takes ~2-3 min, we loop for ~5 hours
+    # to bypass GitHub Actions scheduled-workflow queue delays. The */5 cron
+    # acts as a restart trigger after the loop exits. Concurrency group
+    # `rt-scanner` ensures only one chain runs at a time. This workflow clones
+    # the private dmv-monitor-v2 repo at runtime (read-only token) and runs
+    # the dedicated road-test-only entrypoint (apps/scanner/src/rt-scanner.ts).
+    timeout-minutes: 330
+
+    steps:
+      - name: Clone private scanner repo (read-only token)
+        run: |
+          git clone --depth 1 \
+            "https://x-access-token:${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/David-Cito/dmv-monitor-v2.git" \
+            scanner
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: scanner/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: scanner
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Road Test Scanner (continuous HTTP loop)
+        working-directory: scanner
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          # Continuous HTTP scan loop for ~5 hours, exiting cleanly before the
+          # job timeout. The */5 cron only restarts the chain after it exits.
+          # A full HTTP scan is <~10s, so we run effectively continuously by day
+          # (near-real-time: ~30% of RT slots die within a single ~3-min tick).
+          # Night mode (1-5am HST): a modest 30s pause between scans so we are
+          # not hammering at the deadest hours. Per-scan in-process backoff (in
+          # the scanner) handles transient DMV errors; this loop only adds the
+          # coarse night throttle and keeps the chain alive on a failed scan.
+          end_time=$(($(date +%s) + 18000))  # now + 5 hours
+          iteration=0
+          while [ $(date +%s) -lt $end_time ]; do
+            iteration=$((iteration + 1))
+            echo "=== rt-scan iteration $iteration ($(TZ=Pacific/Honolulu date +%H:%M:%S) HST) ==="
+            pnpm exec tsx apps/scanner/src/rt-scanner.ts \
+              || echo "iteration $iteration failed (continuing)"
+            # Night-mode throttle: only sleep during 1-5am Hawaii time.
+            hst_hour=$(TZ=Pacific/Honolulu date +%H)
+            if [ "$hst_hour" -ge 1 ] && [ "$hst_hour" -lt 5 ]; then
+              echo "night mode (HST ${hst_hour}h): 30s pause"
+              sleep 30
+            fi
+            # Bail if we're about to exceed the budget on the next iteration.
+            [ $((end_time - $(date +%s))) -lt 15 ] && break
+          done
+          echo "loop complete after $iteration iterations"
