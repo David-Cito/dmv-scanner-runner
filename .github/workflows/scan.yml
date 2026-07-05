@@ -76,3 +76,5 @@ jobs:
             [ $((end_time - $(date +%s))) -lt 15 ] && break
           done
           echo "loop complete after $iteration iterations"
+
+# gate: relay-scanner Option 2 bootstrap
