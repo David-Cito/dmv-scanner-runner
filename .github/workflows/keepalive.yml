@@ -1,0 +1,53 @@
+name: Keepalive (defeat GitHub's 60-day scheduled-workflow disable)
+
+# GitHub disables every scheduled workflow in a public repo after 60 days
+# without repository activity. It did exactly that to scan.yml on
+# 2026-09-02 (last commit 2026-07-05), and the road-test scanner silently
+# stopped for ~38 hours. This workflow makes one diff-bearing commit a
+# month (a real commit is the documented definition of "activity"; an
+# empty commit was NOT enough on this repo) and, as a second line of
+# defence, re-enables scan.yml in case anything disabled it.
+#
+# No pull_request trigger on purpose: fork PRs must never reach secrets.
+
+on:
+  schedule:
+    - cron: '0 12 1 * *'   # monthly, 1st at 12:00 UTC (02:00 HST)
+  workflow_dispatch:
+    inputs: {}
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Diff-bearing commit (resets the 60-day inactivity timer)
+        run: |
+          stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "- ${stamp} keepalive run ${GITHUB_RUN_ID}" >> KEEPALIVE.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add KEEPALIVE.md
+          git commit -m "chore(keepalive): ${stamp} - keep scheduled workflows enabled"
+          git push
+
+      - name: Re-enable the scanner workflow if anything disabled it
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow enable scan.yml -R "$GITHUB_REPOSITORY"
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows" \
+            -q '.workflows[] | "\(.name): \(.state)"'
