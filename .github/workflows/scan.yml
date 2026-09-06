@@ -50,6 +50,9 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Healthchecks.io project ping key (dead-man's switch). Empty = no pings.
+          HEALTHCHECKS_PING_KEY: ${{ secrets.HEALTHCHECKS_PING_KEY }}
+          WEB_APP_ORIGIN: https://oahustandby.com
         run: |
           # Continuous HTTP scan loop for ~5 hours, exiting cleanly before the
           # job timeout. The */5 cron only restarts the chain after it exits.
@@ -59,13 +62,35 @@ jobs:
           # not hammering at the deadest hours. Per-scan in-process backoff (in
           # the scanner) handles transient DMV errors; this loop only adds the
           # coarse night throttle and keeps the chain alive on a failed scan.
+          # Dead-man's switch (Healthchecks.io). Two checks ride this loop:
+          #   rt-runner  pinged after every scanner exit 0 -> "the RT scanner is alive"
+          #   web-app    pinged only when oahustandby.com answers 200 AND the SMS
+          #              dispatch route answers 401 (auth-gated but alive). The
+          #              customer SMS dispatcher POSTs to that route, so a Vercel
+          #              outage silently kills customer texts. Free synthetic
+          #              check from OUTSIDE the stack, no third vendor.
+          # A ping must never break the loop: -f/-m/|| true everywhere.
+          hc_ping() {  # $1 = slug
+            [ -n "$HEALTHCHECKS_PING_KEY" ] || return 0
+            curl -fsS -m 5 --retry 2 -o /dev/null "https://hc-ping.com/${HEALTHCHECKS_PING_KEY}/$1" \
+              || echo "heartbeat $1: ping failed (ignored)"
+          }
+          web_app_alive() {
+            curl -fsS -m 10 -o /dev/null "$WEB_APP_ORIGIN/" || return 1
+            code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$WEB_APP_ORIGIN/api/internal/dispatch-sms" || echo 000)
+            [ "$code" = "401" ]
+          }
           end_time=$(($(date +%s) + 18000))  # now + 5 hours
           iteration=0
           while [ $(date +%s) -lt $end_time ]; do
             iteration=$((iteration + 1))
             echo "=== rt-scan iteration $iteration ($(TZ=Pacific/Honolulu date +%H:%M:%S) HST) ==="
-            pnpm exec tsx apps/scanner/src/rt-scanner.ts \
-              || echo "iteration $iteration failed (continuing)"
+            if pnpm exec tsx apps/scanner/src/rt-scanner.ts; then
+              hc_ping rt-runner
+              if web_app_alive; then hc_ping web-app; else echo "web-app check failed (no ping)"; fi
+            else
+              echo "iteration $iteration failed (continuing)"
+            fi
             # Night-mode throttle: only sleep during 1-5am Hawaii time.
             hst_hour=$(TZ=Pacific/Honolulu date +%H)
             if [ "$hst_hour" -ge 1 ] && [ "$hst_hour" -lt 5 ]; then
