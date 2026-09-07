@@ -59,6 +59,19 @@ jobs:
         working-directory: scanner
         run: pnpm install --frozen-lockfile
 
+      # A stale fallback asserts old truth at the one moment nobody is
+      # watching, so it is checked daily rather than discovered during an
+      # outage. Non-blocking: a drifted fallback must not stop the probe from
+      # writing proposals or pinging its heartbeat.
+      - name: Check the office fallbacks are still true
+        continue-on-error: true
+        working-directory: scanner
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          CHECK_LIVE_FALLBACKS: '1'
+        run: pnpm --filter @dmv/web exec vitest run src/lib/__tests__/fallbacks.contract.test.ts
+
       - name: Run the drift probe
         working-directory: scanner
         env:
