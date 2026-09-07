@@ -13,9 +13,12 @@ name: Catalog drift probe (b50)
 
 on:
   schedule:
-    # 15:20 UTC = 05:20 HST, before the county's usual release window, so the
-    # owner sees proposals with the morning rather than mid-afternoon.
-    - cron: '20 15 * * *'
+    # 17:00 UTC = 07:00 HST. Hawaii does not observe daylight saving, so this
+    # is 7am year round. Chosen over an earlier slot because a no_dates
+    # proposal pages by Pushover at emergency priority, and neither dispatcher
+    # consults the 22:00-06:00 quiet-hours window, so an early cron would ring
+    # the phone before the owner is up.
+    - cron: '0 17 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
