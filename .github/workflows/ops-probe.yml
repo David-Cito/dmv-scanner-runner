@@ -1,0 +1,75 @@
+name: Ops probe (off-stack health)
+
+# Every 10 minutes, from a machine that is NOT the Supabase instance, ask the
+# database five questions and page with the answers in the text.
+#
+# Why this exists: on 2026-09-08 every in-stack alarm (pg_cron -> pg_net ->
+# edge functions -> dispatcher) starved together at 10:55 HST, and the only
+# thing that reached the operator was the dead-man's switch three hours later,
+# saying "a check missed its ping" and nothing else. This probe would have
+# fired at 10:56 on the "did the query time out" question alone.
+#
+# Like scan.yml and drift-probe.yml, this repo holds only the workflow. The
+# probe lives in the private monorepo at apps/scanner/src/ops-probe.mjs and is
+# cloned at run time with PRIVATE_REPO_TOKEN. Unlike those, it needs NO pnpm
+# install: it is dependency-free by design (a watchdog should depend on as
+# little as possible, and at this cadence the install would cost more than the
+# probe), so the run is a clone and a `node`.
+#
+# Reporting is deliberately NOT through notification_queue — the dispatcher is
+# one of the things being watched. On a bad verdict it posts the Discord
+# webhook directly and pings hc-ping.com/<key>/ops-probe/fail, which pages
+# Pushover through the existing Healthchecks integrations. On a good verdict
+# it pings the same check's success URL: if GitHub Actions itself stops
+# running this, the dead-man's switch pages on the silence.
+#
+# Plan §9: docs/superpowers/ui/2026-09-08-post-incident-plan/plan.md (monorepo)
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Print the verdict, report nowhere, exit 0'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ops-probe
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ops-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Clone private scanner repo (read-only token)
+        run: |
+          git clone --depth 1 \
+            "https://x-access-token:${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/David-Cito/dmv-monitor-v2.git" \
+            scanner
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Run the probe
+        working-directory: scanner
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          HEALTHCHECKS_PING_KEY: ${{ secrets.HEALTHCHECKS_PING_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          OPS_DASHBOARD_URL: ${{ secrets.OPS_DASHBOARD_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            node apps/scanner/src/ops-probe.mjs --dry-run
+          else
+            # A bad verdict exits 1 on purpose, so the run shows red here too.
+            node apps/scanner/src/ops-probe.mjs
+          fi
