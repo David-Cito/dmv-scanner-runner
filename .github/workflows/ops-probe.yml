@@ -1,29 +1,35 @@
 name: Ops probe (off-stack health)
 
-# Every 10 minutes, from a machine that is NOT the Supabase instance, ask the
-# database five questions and page with the answers in the text.
+# A machine that is NOT the Supabase instance asks the database seven
+# questions every 10 minutes and pages with the answers in the text.
 #
 # Why this exists: on 2026-09-08 every in-stack alarm (pg_cron -> pg_net ->
 # edge functions -> dispatcher) starved together at 10:55 HST, and the only
 # thing that reached the operator was the dead-man's switch three hours later,
 # saying "a check missed its ping" and nothing else. This probe would have
-# fired at 10:56 on the "did the query time out" question alone.
+# fired at 10:56 on the "did the query time out" question alone, and the swap
+# question would have fired hours before that.
 #
 # Like scan.yml and drift-probe.yml, this repo holds only the workflow. The
 # probe lives in the private monorepo at apps/scanner/src/ops-probe.mjs and is
 # cloned at run time with PRIVATE_REPO_TOKEN. Unlike those, it needs NO pnpm
 # install: it is dependency-free by design (a watchdog should depend on as
-# little as possible, and at this cadence the install would cost more than the
-# probe), so the run is a clone and a `node`.
+# little as possible), so the run is a clone and a `node`.
+#
+# WHY A LOOP, NOT A `*/10` SCHEDULE. GitHub's scheduler on this repo lags by
+# hours (2026-09-09: a plain `*/10` workflow did not fire once in two hours),
+# which is exactly why scan.yml runs the road-test scanner as a 5-hour loop.
+# Same shape here: one job loops for ~5 hours running the probe every 10
+# minutes; the concurrency group queues the next scheduled run so it starts
+# the moment this one ends. The probe pings its Healthchecks check on every
+# good iteration; the check's grace (20 min) absorbs the restart gap.
 #
 # Reporting is deliberately NOT through notification_queue — the dispatcher is
-# one of the things being watched. On a bad verdict it posts the Discord
+# one of the things being watched. On a bad verdict the probe posts the Discord
 # webhook directly and pings hc-ping.com/<key>/ops-probe/fail, which pages
-# Pushover through the existing Healthchecks integrations. On a good verdict
-# it pings the same check's success URL: if GitHub Actions itself stops
-# running this, the dead-man's switch pages on the silence.
+# Pushover through the existing Healthchecks integrations.
 #
-# Plan §9: docs/superpowers/ui/2026-09-08-post-incident-plan/plan.md (monorepo)
+# Plan §9 and §2: docs/superpowers/ui/2026-09-08-post-incident-plan/plan.md (monorepo)
 
 on:
   schedule:
@@ -31,7 +37,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Print the verdict, report nowhere, exit 0'
+        description: 'One pass: print the verdict, report nowhere, exit 0'
         type: boolean
         default: false
 
@@ -45,7 +51,7 @@ permissions:
 jobs:
   ops-probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 330
 
     steps:
       - name: Clone private scanner repo (read-only token)
@@ -58,7 +64,7 @@ jobs:
         with:
           node-version: 22
 
-      - name: Run the probe
+      - name: Run the probe (one pass, or a 5-hour loop every 10 minutes)
         working-directory: scanner
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -69,7 +75,20 @@ jobs:
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             node apps/scanner/src/ops-probe.mjs --dry-run
-          else
-            # A bad verdict exits 1 on purpose, so the run shows red here too.
-            node apps/scanner/src/ops-probe.mjs
+            exit $?
           fi
+          end_time=$(($(date +%s) + 18000))  # now + 5 hours; the job cap is 330 min
+          iteration=0
+          bad=0
+          while [ $(date +%s) -lt $end_time ]; do
+            iteration=$((iteration + 1))
+            echo "=== ops-probe iteration $iteration ($(TZ=Pacific/Honolulu date +%H:%M:%S) HST) ==="
+            # A bad verdict exits 1 and has already paged; the loop keeps
+            # going so the NEXT iteration can report recovery.
+            if node apps/scanner/src/ops-probe.mjs; then :; else bad=$((bad + 1)); fi
+            [ $((end_time - $(date +%s))) -lt 620 ] && break
+            sleep 600
+          done
+          echo "loop complete after $iteration iterations, $bad bad verdicts"
+          # Red run if anything was bad during the loop, so the Actions list shows it.
+          [ "$bad" -eq 0 ]
