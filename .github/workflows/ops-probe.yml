@@ -1,6 +1,6 @@
 name: Ops probe (off-stack health)
 
-# A machine that is NOT the Supabase instance asks the database seven
+# A machine that is NOT the Supabase instance asks the database ten
 # questions every 10 minutes and pages with the answers in the text.
 #
 # Why this exists: on 2026-09-08 every in-stack alarm (pg_cron -> pg_net ->
@@ -72,6 +72,11 @@ jobs:
           HEALTHCHECKS_PING_KEY: ${{ secrets.HEALTHCHECKS_PING_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           OPS_DASHBOARD_URL: ${{ secrets.OPS_DASHBOARD_URL }}
+          # The public read path (2026-09-13): the probe asks the view for
+          # rows with the same key the website uses, so a permissions change
+          # or a bad Vercel variable cannot hide behind the marketing pages'
+          # week of remembered dates. Absent = the question is skipped.
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             node apps/scanner/src/ops-probe.mjs --dry-run
