@@ -85,7 +85,12 @@ jobs:
           while [ $(date +%s) -lt $end_time ]; do
             iteration=$((iteration + 1))
             echo "=== rt-scan iteration $iteration ($(TZ=Pacific/Honolulu date +%H:%M:%S) HST) ==="
-            if pnpm exec tsx apps/scanner/src/rt-scanner.ts; then
+            # Hard per-scan ceiling: even with the scanner's own fetch timeouts,
+            # a wedged process must never freeze this 5-hour loop (2026-09-27: a
+            # hung scan blocked the chain for hours and silenced both dead-man
+            # checks). timeout returns 124 on a hang -> treated as a failed
+            # iteration -> loop continues and re-pings on the next good scan.
+            if timeout -k 15 300 pnpm exec tsx apps/scanner/src/rt-scanner.ts; then
               hc_ping rt-runner
               if web_app_alive; then hc_ping web-app; else echo "web-app check failed (no ping)"; fi
             else

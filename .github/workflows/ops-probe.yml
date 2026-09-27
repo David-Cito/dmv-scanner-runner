@@ -90,7 +90,11 @@ jobs:
             echo "=== ops-probe iteration $iteration ($(TZ=Pacific/Honolulu date +%H:%M:%S) HST) ==="
             # A bad verdict exits 1 and has already paged; the loop keeps
             # going so the NEXT iteration can report recovery.
-            if node apps/scanner/src/ops-probe.mjs; then :; else bad=$((bad + 1)); fi
+            # Per-pass ceiling. The probe bounds its own fetches, but a wedged
+            # process must never freeze this 5-hour loop (see scan.yml, same
+            # incident 2026-09-27). timeout 120 is well above a healthy pass;
+            # a hang (exit 124) counts as a bad verdict and the loop continues.
+            if timeout -k 15 120 node apps/scanner/src/ops-probe.mjs; then :; else bad=$((bad + 1)); fi
             [ $((end_time - $(date +%s))) -lt 620 ] && break
             sleep 600
           done
