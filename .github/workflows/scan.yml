@@ -10,12 +10,18 @@ concurrency:
   group: rt-scanner
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  actions: write  # queue our own successor (workflow_dispatch is allowed from GITHUB_TOKEN)
+
 jobs:
   rt-scan:
     runs-on: ubuntu-latest
     # Long-running loop job: each scan takes ~2-3 min, we loop for ~5 hours
-    # to bypass GitHub Actions scheduled-workflow queue delays. The */5 cron
-    # acts as a restart trigger after the loop exits. Concurrency group
+    # to bypass GitHub Actions scheduled-workflow queue delays. Each run queues
+    # its own successor as it starts (gh workflow run), so the next loop begins
+    # the moment this one ends; the */5 cron is only the restart trigger if
+    # that chain breaks (2026-10-05: the cron alone left 3-9 hour gaps). Concurrency group
     # `rt-scanner` ensures only one chain runs at a time. This workflow clones
     # the private dmv-monitor-v2 repo at runtime (read-only token) and runs
     # the dedicated road-test-only entrypoint (apps/scanner/src/rt-scanner.ts).
@@ -47,6 +53,7 @@ jobs:
       - name: Run Road Test Scanner (continuous HTTP loop)
         working-directory: scanner
         env:
+          GH_TOKEN: ${{ github.token }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -81,6 +88,11 @@ jobs:
             [ "$code" = "401" ]
           }
           end_time=$(($(date +%s) + 18000))  # now + 5 hours
+          # Queue our successor now: the concurrency group holds it pending
+          # until this run ends. A scheduled run arriving later replaces it,
+          # so there is still exactly one pending.
+          gh workflow run scan.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
+            || echo "::warning::could not queue the next run; relying on the schedule"
           iteration=0
           while [ $(date +%s) -lt $end_time ]; do
             iteration=$((iteration + 1))

@@ -20,9 +20,13 @@ name: Ops probe (off-stack health)
 # hours (2026-09-09: a plain `*/10` workflow did not fire once in two hours),
 # which is exactly why scan.yml runs the road-test scanner as a 5-hour loop.
 # Same shape here: one job loops for ~5 hours running the probe every 10
-# minutes; the concurrency group queues the next scheduled run so it starts
-# the moment this one ends. The probe pings its Healthchecks check on every
-# good iteration; the check's grace (20 min) absorbs the restart gap.
+# minutes. Each run queues its own successor with `gh workflow run` as it
+# starts; the concurrency group holds that run pending and starts it the
+# moment this one ends. (2026-10-05: relying on the schedule alone left gaps
+# of 3-9 hours between loops, which was the daily "ops-probe is DOWN" email.)
+# The schedule stays as the restart trigger if the chain ever breaks. The
+# probe pings its Healthchecks check on every good iteration; the check's
+# grace (20 min) absorbs the ~1-minute handover.
 #
 # Reporting is deliberately NOT through notification_queue — the dispatcher is
 # one of the things being watched. On a bad verdict the probe posts the Discord
@@ -47,6 +51,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: write  # queue our own successor (workflow_dispatch is allowed from GITHUB_TOKEN)
 
 jobs:
   ops-probe:
@@ -67,6 +72,7 @@ jobs:
       - name: Run the probe (one pass, or a 5-hour loop every 10 minutes)
         working-directory: scanner
         env:
+          GH_TOKEN: ${{ github.token }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           HEALTHCHECKS_PING_KEY: ${{ secrets.HEALTHCHECKS_PING_KEY }}
@@ -83,6 +89,12 @@ jobs:
             exit $?
           fi
           end_time=$(($(date +%s) + 18000))  # now + 5 hours; the job cap is 330 min
+          # Queue our successor now. The concurrency group holds it pending
+          # until this run ends, so it starts seconds later instead of whenever
+          # GitHub's scheduler next fires. A scheduled run arriving later
+          # replaces it, so there is still exactly one pending.
+          gh workflow run ops-probe.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
+            || echo "::warning::could not queue the next run; relying on the schedule"
           iteration=0
           bad=0
           while [ $(date +%s) -lt $end_time ]; do
